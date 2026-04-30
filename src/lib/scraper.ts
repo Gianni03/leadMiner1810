@@ -351,11 +351,11 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
     
 // Paso 2: Raspar perfiles individuales (si hay links)
     if (profileLinks.length > 0) {
-      // Tomar hasta 30 perfiles únicos (eliminar duplicados por URL base)
+      // Tomar hasta 50 perfiles únicos (eliminar duplicados por URL base)
       const uniqueProfileUrls = [...new Set(profileLinks)];
-      console.log(`Raspando ${Math.min(uniqueProfileUrls.length, 30)} perfiles individuales...`);
+      console.log(`Raspando ${Math.min(uniqueProfileUrls.length, 50)} perfiles individuales...`);
       
-      for (const profileUrl of uniqueProfileUrls.slice(0, 30)) { // Limitar a 30 perfiles
+      for (const profileUrl of uniqueProfileUrls.slice(0, 50)) { // Limitar a 50 perfiles
         try {
           const profileData = await scrapeProfile(page, profileUrl);
           
