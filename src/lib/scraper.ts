@@ -14,6 +14,8 @@ export type ScrapedContact = {
   localidad?: string;
   provincia?: string;
   urlFuente?: string;
+  // Propiedades internas (no se exportan)
+  _profileScraped?: boolean;
 };
 
 // Regex para clasificar links
