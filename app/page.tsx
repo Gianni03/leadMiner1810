@@ -15,8 +15,11 @@ type Contact = {
   urlFuente?: string;
 };
 
+type ScrapingType = "auto" | "cards" | "table" | "links";
+
 export default function Home() {
   const [url, setUrl] = useState("");
+  const [scrapingType, setScrapingType] = useState<ScrapingType>("auto");
   const [results, setResults] = useState<Contact[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -30,7 +33,7 @@ export default function Home() {
       const response = await fetch("/api/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, type: scrapingType }),
       });
       const data = await response.json();
       setResults(data.results || []);
@@ -121,6 +124,16 @@ export default function Home() {
             className="flex-1 p-2 border rounded"
             required
           />
+          <select
+            value={scrapingType}
+            onChange={(e) => setScrapingType(e.target.value as ScrapingType)}
+            className="p-2 border rounded"
+          >
+            <option value="auto">Auto Detect</option>
+            <option value="cards">Cards</option>
+            <option value="table">Table</option>
+            <option value="links">Links + Profiles</option>
+          </select>
           <button
             type="submit"
             disabled={isLoading || !url}

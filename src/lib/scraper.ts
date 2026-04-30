@@ -200,7 +200,7 @@ function isValidName(name: string): boolean {
   return true;
 }
 
-export async function scrapeContacts(url: string): Promise<ScrapedContact[]> {
+export async function scrapeContacts(url: string, type: string = "auto"): Promise<ScrapedContact[]> {
   let browser: Browser | null = null;
   const contacts: ScrapedContact[] = [];
   
@@ -209,6 +209,7 @@ export async function scrapeContacts(url: string): Promise<ScrapedContact[]> {
     const page = await browser.newPage();
     
     // Paso 1: Raspar la página principal
+    console.log(`Iniciando scraping (tipo: ${type})...`);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     await page.waitForTimeout(1500);
     

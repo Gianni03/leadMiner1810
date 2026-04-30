@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { scrapeContacts } from "@/lib/scraper";
 
 export async function POST(request: Request) {
-  const { url } = await request.json();
+  const { url, type } = await request.json();
   
   if (!url) {
     return NextResponse.json(
@@ -12,7 +12,7 @@ export async function POST(request: Request) {
   }
   
   try {
-    const results = await scrapeContacts(url);
+    const results = await scrapeContacts(url, type);
     return NextResponse.json({ results });
   } catch (error) {
     console.error("Scraping error:", error);
