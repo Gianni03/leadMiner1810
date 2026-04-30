@@ -320,18 +320,31 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
     
     console.log("Perfiles detectados:", profileLinks);
     
-    // Crear contactos iniciales (página principal)
-    for (let i = 0; i < validNames.length; i++) {
+// Crear contactos iniciales (página principal)
+    // Guardamos las redes de la página principal para usarlas como fallback
+    const pageEmails = emails;
+    const pageInstagrams = instagramLinks;
+    const pageX = xLinks;
+    const pageLinkedin = linkedinLinks;
+    const pageFacebook = facebookLinks;
+    
+    const names = nameElements.filter(Boolean);
+    const roles = roleElements.filter(Boolean).slice(0, names.length);
+    
+    for (let i = 0; i < names.length; i++) {
       contacts.push({
-        nombre: validNames[i],
-        cargo: validRoles[i] || undefined,
+        nombre: names[i],
+        cargo: roles[i] || undefined,
         organizacion: await page.title() || undefined,
-        email: emails[i] || undefined,
-        instagram: instagramLinks[i] || undefined,
-        x: xLinks[i] || undefined,
-        linkedin: linkedinLinks[i] || undefined,
-        facebook: facebookLinks[i] || undefined,
+        // Las redes de la página principal son fallback - se sobrescribirán con datos del perfil
+        email: pageEmails[i] || undefined,
+        instagram: pageInstagrams[i] || undefined,
+        x: pageX[i] || undefined,
+        linkedin: pageLinkedin[i] || undefined,
+        facebook: pageFacebook[i] || undefined,
         urlFuente: url,
+        // Flag para saber si ya scrapeamos el perfil
+        _profileScraped: false,
       });
     }
     
@@ -359,24 +372,43 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
         try {
           const profileData = await scrapeProfile(page, profileUrl);
           
-          // Filtrar nombre del perfil
-          if (profileData.nombre && isValidName(profileData.nombre)) {
-            // Buscar si el contacto ya existe (por nombre o cargo)
-            const existingContactIndex = contacts.findIndex(
-              (contact) => contact.nombre === profileData.nombre || 
-                          (contact.cargo && profileData.cargo && contact.cargo === profileData.cargo)
-            );
-            
-            if (existingContactIndex >= 0) {
-              // Actualizar contacto existente
-              contacts[existingContactIndex] = {
-                ...contacts[existingContactIndex],
-                ...profileData,
-              };
-            } else {
-              // Agregar nuevo contacto
-              contacts.push(profileData);
+          // PRIORIZAR datos del perfil sobre los de la página principal
+          // Buscar coincidencia por nombre en los contactos existentes
+          const existingContactIndex = contacts.findIndex(
+            (contact) => {
+              if (!contact.nombre || !profileData.nombre) return false;
+              // Coincidencia por nombre parcial o completo
+              const contactNameLower = contact.nombre.toLowerCase();
+              const profileNameLower = profileData.nombre.toLowerCase();
+              return contactNameLower.includes(profileNameLower) || 
+                     profileNameLower.includes(contactNameLower);
             }
+          );
+          
+          if (existingContactIndex >= 0) {
+            // SOBRESCRIBIR todos los datos del perfil (prioridad total)
+            // Esto incluye: email, instagram, x, linkedin, facebook, telefono
+            contacts[existingContactIndex] = {
+              ...contacts[existingContactIndex],
+              nombre: profileData.nombre || contacts[existingContactIndex].nombre,
+              cargo: profileData.cargo || contacts[existingContactIndex].cargo,
+              email: profileData.email || contacts[existingContactIndex].email,
+              instagram: profileData.instagram || contacts[existingContactIndex].instagram,
+              x: profileData.x || contacts[existingContactIndex].x,
+              linkedin: profileData.linkedin || contacts[existingContactIndex].linkedin,
+              facebook: profileData.facebook || contacts[existingContactIndex].facebook,
+              telefono: profileData.telefono || contacts[existingContactIndex].telefono,
+              organizacion: profileData.organizacion || contacts[existingContactIndex].organizacion,
+              urlFuente: profileUrl, // Actualizar URL fuente al perfil
+              _profileScraped: true,
+            };
+          } else if (profileData.nombre && isValidName(profileData.nombre)) {
+            // Agregar nuevo contacto del perfil
+            contacts.push({
+              ...profileData,
+              urlFuente: profileUrl,
+              _profileScraped: true,
+            });
           }
         } catch (error) {
           console.error(`Error raspando perfil ${profileUrl}:`, error);
