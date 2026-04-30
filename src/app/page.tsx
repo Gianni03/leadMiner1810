@@ -59,6 +59,7 @@ export default function Home() {
   const [url, setUrl] = useState("");
   const [scrapingType, setScrapingType] = useState<ScrapingType>("auto");
   const [results, setResults] = useState<Contact[]>([]);
+  const [excludedIndices, setExcludedIndices] = useState<Set<number>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -68,6 +69,7 @@ export default function Home() {
     
     setIsLoading(true);
     setResults([]);
+    setExcludedIndices(new Set());
     try {
       const response = await fetch("/api/scrape", {
         method: "POST",
@@ -91,21 +93,25 @@ export default function Home() {
   };
 
   const filteredResults = useMemo(() => {
-    if (!searchTerm) return results;
+    let filtered = results;
+    // Filtrar excluidos
+    filtered = results.filter((_, index) => !excludedIndices.has(index));
+    // Filtrar búsqueda
+    if (!searchTerm) return filtered;
     const term = searchTerm.toLowerCase();
-    return results.filter((contact) => 
+    return filtered.filter((contact) => 
       contact.nombre?.toLowerCase().includes(term) ||
       contact.email?.toLowerCase().includes(term) ||
       contact.cargo?.toLowerCase().includes(term) ||
       contact.organizacion?.toLowerCase().includes(term)
     );
-  }, [results, searchTerm]);
+  }, [results, searchTerm, excludedIndices]);
 
   const exportCSV = () => {
-    if (filteredResults.length === 0) return;
+    if (visibleContacts.length === 0) return;
     
     const headers = ["Nombre", "Email", "Cargo", "Organización", "Instagram", "X", "LinkedIn", "Facebook", "Teléfono", "URL Fuente"];
-    const rows = filteredResults.map((c) => [
+    const rows = visibleContacts.map((c) => [
       c.nombre || "",
       c.email || "",
       c.cargo || "",
@@ -131,9 +137,9 @@ export default function Home() {
   };
 
   const exportJSON = () => {
-    if (filteredResults.length === 0) return;
+    if (visibleContacts.length === 0) return;
     
-    const jsonContent = JSON.stringify(filteredResults, null, 2);
+    const jsonContent = JSON.stringify(visibleContacts, null, 2);
     const blob = new Blob([jsonContent], { type: "application/json" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
@@ -141,10 +147,30 @@ export default function Home() {
     link.click();
   };
 
-  const copyToClipboard = async () => {
-    if (filteredResults.length === 0) return;
+  const excludeContact = (index: number) => {
+    // Calcular el índice real en el array original
+    const originalIndex = results.findIndex((_, i) => {
+      const filtered = filteredResults;
+      return filtered[index] === results[i];
+    });
+    if (originalIndex >= 0) {
+      setExcludedIndices(prev => new Set([...prev, originalIndex]));
+    }
+  };
+
+  const clearExcluded = () => {
+    setExcludedIndices(new Set());
+  };
+
+  // Contactos filtrados (sin los excluidos)
+  const visibleContacts = useMemo(() => {
+    return results.filter((_, index) => !excludedIndices.has(index));
+  }, [results, excludedIndices]);
+
+const copyToClipboard = async () => {
+    if (visibleContacts.length === 0) return;
     
-    const text = filteredResults
+    const text = visibleContacts
       .map((c) => `${c.nombre || ""}\t${c.email || ""}\t${c.cargo || ""}\t${c.organizacion || ""}\t${c.instagram || ""}\t${c.x || ""}\t${c.linkedin || ""}\t${c.facebook || ""}`)
       .join("\n");
     
@@ -153,12 +179,13 @@ export default function Home() {
   };
 
   const stats = useMemo(() => {
-    const total = results.length;
-    const withEmail = results.filter(r => r.email).length;
-    const withPhone = results.filter(r => r.telefono).length;
-    const withSocial = results.filter(r => r.instagram || r.x || r.linkedin || r.facebook).length;
+    const contacts = results.filter((_, i) => !excludedIndices.has(i));
+    const total = contacts.length;
+    const withEmail = contacts.filter(r => r.email).length;
+    const withPhone = contacts.filter(r => r.telefono).length;
+    const withSocial = contacts.filter(r => r.instagram || r.x || r.linkedin || r.facebook).length;
     return { total, withEmail, withPhone, withSocial };
-  }, [results]);
+  }, [results, excludedIndices]);
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50">
@@ -263,7 +290,15 @@ export default function Home() {
                 </div>
               </div>
               
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
+                {excludedIndices.size > 0 && (
+                  <button
+                    onClick={clearExcluded}
+                    className="px-3 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-all text-sm font-medium"
+                  >
+                    🔄 Limpiar ({excludedIndices.size})
+                  </button>
+                )}
                 <button
                   onClick={exportCSV}
                   className="px-4 py-2 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-lg hover:from-green-600 hover:to-emerald-600 transition-all text-sm font-medium shadow-md"
@@ -316,7 +351,7 @@ export default function Home() {
                 className="bg-white/80 backdrop-blur-sm rounded-xl shadow-lg shadow-blue-100/20 p-5 border border-white/50 hover:shadow-xl hover:shadow-blue-100/40 transition-all duration-300 hover:-translate-y-1"
               >
                 <div className="flex items-start justify-between mb-3">
-                  <div>
+                  <div className="flex-1">
                     <h3 className="font-bold text-gray-900 text-lg leading-tight">
                       {contact.nombre || "Sin nombre"}
                     </h3>
@@ -326,6 +361,13 @@ export default function Home() {
                       </span>
                     )}
                   </div>
+                  <button
+                    onClick={() => excludeContact(index)}
+                    className="text-gray-400 hover:text-red-500 transition-colors p-1"
+                    title="Eliminar contacto"
+                  >
+                    ✕
+                  </button>
                   <div className="w-10 h-10 bg-gradient-to-br from-blue-400 to-indigo-500 rounded-full flex items-center justify-center text-white font-bold text-lg">
                     {(contact.nombre || "?").charAt(0).toUpperCase()}
                   </div>
