@@ -1,7 +1,19 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { scrapeContactsClient, type Contact } from "@/lib/scraper-client";
+
+type Contact = {
+  nombre?: string;
+  cargo?: string;
+  organizacion?: string;
+  email?: string;
+  instagram?: string;
+  x?: string;
+  linkedin?: string;
+  facebook?: string;
+  telefono?: string;
+  urlFuente?: string;
+};
 
 type Contact = {
   nombre?: string;
@@ -72,16 +84,22 @@ export default function Home() {
     setResults([]);
     setExcludedIndices(new Set());
     try {
-      // Usar scraping del lado del cliente (funciona en Vercel)
-      const contacts = await scrapeContactsClient(url);
-      setResults(contacts);
-      
-      if (contacts.length === 0) {
-        alert("No se encontraron contactos. Probá con otra URL.");
+      const response = await fetch("/api/scrape", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, type: scrapingType }),
+      });
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const data = await response.json();
+        setResults(data.results || []);
+      } else {
+        console.error("API returned non-JSON response");
+        alert("Error del servidor. Probá de nuevo.");
       }
     } catch (error) {
       console.error("Error scraping:", error);
-      alert("Error al hacer scraping. Verificá la URL.");
+      alert("Error de conexión. Verificá la URL.");
     } finally {
       setIsLoading(false);
     }

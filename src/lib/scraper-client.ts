@@ -84,18 +84,47 @@ export async function scrapeContactsClient(url: string): Promise<ScrapedContact[
   const contacts: ScrapedContact[] = [];
   
   try {
-    // Usar fetch para obtener el HTML directamente (sin JS)
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
+    // Intentar con fetch directo primero
+    let html = "";
+    let fetchSuccess = false;
     
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        },
+        mode: "cors",
+      });
+      
+      if (response.ok) {
+        html = await response.text();
+        fetchSuccess = true;
+      }
+    } catch (e) {
+      console.log("Direct fetch failed, trying CORS proxy...", e);
     }
     
-    const html = await response.text();
+    // Si fetch directo falló por CORS, intentar con proxy público
+    if (!fetchSuccess) {
+      // Usar un proxy CORS público
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
+      try {
+        const response = await fetch(proxyUrl);
+        const data = await response.json();
+        if (data.contents) {
+          html = data.contents;
+          fetchSuccess = true;
+        }
+      } catch (e) {
+        console.log("Proxy also failed:", e);
+      }
+    }
+    
+    if (!html) {
+      throw new Error("No se pudo obtener el HTML de la página");
+    }
     
     // Crear un DOM parser
     const parser = new DOMParser();
@@ -189,8 +218,10 @@ export async function scrapeContactsClient(url: string): Promise<ScrapedContact[
     
     console.log("Contactos extraídos (client):", contacts);
     return contacts;
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Error en scrapeContactsClient:", error);
+    const errorMessage = error instanceof Error ? error.message : "Error desconocido";
+    alert(`Error al hacer scraping: ${errorMessage}\nVerificá que la URL sea correcta y públicamente accesible.`);
     return [];
   }
 }
