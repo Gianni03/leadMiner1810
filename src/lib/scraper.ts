@@ -14,194 +14,344 @@ export type ScrapedContact = {
   localidad?: string;
   provincia?: string;
   urlFuente?: string;
-  // Propiedades internas (no se exportan)
   _profileScraped?: boolean;
 };
 
-// Regex para clasificar links
-const EMAIL_REGEX = /mailto:([^\"]+)/i;
-const INSTAGRAM_REGEX = /instagram\.com\/([^\"/]+)/i;
-const X_REGEX = /(twitter\.com|x\.com)\/([^\"/]+)/i;
-const LINKEDIN_REGEX = /linkedin\.com\/([^\"/]+)/i;
-const FACEBOOK_REGEX = /facebook\.com\/([^\"/]+)/i;
+// Regex
+const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const INSTAGRAM_REGEX = /instagram\.com\/([^\"/#]+)/i;
+const X_REGEX = /(twitter\.com|x\.com)\/([^\"/#]+)/i;
+const LINKEDIN_REGEX = /linkedin\.com\/([^\"/#]+)/i;
+const FACEBOOK_REGEX = /facebook\.com\/([^\"/#]+)/i;
 
-// Función auxiliar para extraer links y clasificarlos
-export async function extractLinks(page: Page): Promise<{
-  links: Array<{ text: string; href: string }>;
-  emails: string[];
-  instagramLinks: string[];
-  xLinks: string[];
-  linkedinLinks: string[];
-  facebookLinks: string[];
-}> {
-  const links = await page.$$eval("a", (elements) =>
-    elements.map((el) => ({
-      text: el.textContent?.trim() || "",
-      href: el.getAttribute("href") || "",
-    }))
-  );
+// Filtrar nombres válidos
+function isValidName(name: string): boolean {
+  if (!name || name.length < 3) return false;
 
-  const emails = links
-    .map((link) => link.href.match(EMAIL_REGEX)?.[1] || "")
-    .filter(Boolean);
+  const forbidden = [
+    "Concejo Municipal de", "Municipalidad de", "Legislatura de",
+    "Gobierno de", "Actividad Legislativa", "Diputados y Diputadas",
+    "Concejales", "Autoridades", "Bloques", "Comisiones",
+  ];
+  for (const p of forbidden) {
+    if (name.startsWith(p) || name === p) return false;
+  }
 
-  const instagramLinks = links
-    .map((link) => link.href.match(INSTAGRAM_REGEX)?.[0] || "")
-    .filter(Boolean);
+  const ui = ["menu", "secondary", "nav", "sidebar", "toggle", "expand",
+    "collapse", "cerrar", "abrir", "buscar", "volver", "atrás", "inicio",
+    "contacto", "sesión", "canal", "twitter", "facebook", "instagram"];
+  for (const p of ui) {
+    if (new RegExp(`\\b${p}\\b`, "i").test(name)) return false;
+  }
 
-  const xLinks = links
-    .map((link) => link.href.match(X_REGEX)?.[0] || "")
-    .filter(Boolean);
-
-  const linkedinLinks = links
-    .map((link) => link.href.match(LINKEDIN_REGEX)?.[0] || "")
-    .filter(Boolean);
-
-  const facebookLinks = links
-    .map((link) => link.href.match(FACEBOOK_REGEX)?.[0] || "")
-    .filter(Boolean);
-
-  return { links, emails, instagramLinks, xLinks, linkedinLinks, facebookLinks };
+  if (name.length < 4) return false;
+  if (/^\d+$/.test(name)) return false; // Solo números
+  
+  return true;
 }
 
-// Función auxiliar para extraer datos de un perfil individual
-export async function scrapeProfile(page: Page, profileUrl: string): Promise<ScrapedContact> {
+// Detectar si un elemento contiene datos de una persona (email o nombre+cargo)
+function looksLikePersonCard(el: Element): { nombre: string; email: string; cargo: string } | null {
+  const text = el.textContent || "";
+  const emails = text.match(EMAIL_REGEX) || [];
+  
+  // Buscar nombre
+  const nameEl = el.querySelector("h1, h2, h3, h4, strong, b, .name, .title, [class*='nombre'], [class*='name'], [class*='titulo']");
+  const nombre = nameEl?.textContent?.trim() || "";
+  
+  // Buscar cargo/bloque/partido
+  const cargoEl = el.querySelector(".cargo, .role, .bloque, [class*='cargo'], [class*='bloque'], [class*='role'], [class*='partido']");
+  let cargo = cargoEl?.textContent?.trim() || "";
+  
+  // Si no hay cargo explícito, buscar texto que parezca cargo después del nombre
+  if (!cargo && nombre) {
+    const textAfterName = text.replace(nombre, "").trim();
+    const cargoMatch = textAfterName.match(/(bloque\s+[^\n,]+|partido\s+[^\n,]+|concejal[^\n,]*|diputad[^\n,]*|legislador[^\n,]*|intendente[^\n,]*|senador[^\n,]*)/i);
+    if (cargoMatch) cargo = cargoMatch[1].trim();
+  }
+  
+  // Solo considerar si tiene nombre válido o email
+  if (!nombre && emails.length === 0) return null;
+  if (nombre && !isValidName(nombre) && emails.length === 0) return null;
+  
+  return { nombre, email: emails[0] || "", cargo };
+}
+
+// Extraer datos de un card individual
+function extractCardData(el: Element): ScrapedContact | null {
+  const personData = looksLikePersonCard(el);
+  if (!personData) return null;
+  
+  const links = Array.from(el.querySelectorAll("a")).map(a => ({
+    href: a.getAttribute("href") || "",
+    text: a.textContent?.trim() || ""
+  }));
+  
+  const emailFromLink = links.find(l => l.href.startsWith("mailto:"))?.href.replace("mailto:", "") || "";
+  
+  return {
+    nombre: personData.nombre || undefined,
+    cargo: personData.cargo || undefined,
+    email: personData.email || emailFromLink || undefined,
+    instagram: links.find(l => l.href.includes("instagram.com"))?.href || undefined,
+    x: links.find(l => l.href.includes("twitter.com") || l.href.includes("x.com"))?.href || undefined,
+    linkedin: links.find(l => l.href.includes("linkedin.com"))?.href || undefined,
+    facebook: links.find(l => l.href.includes("facebook.com"))?.href || undefined,
+    telefono: links.find(l => l.href.startsWith("tel:"))?.href.replace("tel:", "") || undefined,
+  };
+}
+
+// Detectar paginación y navegar por todas las páginas
+async function scrapeWithPagination(page: Page, url: string): Promise<ScrapedContact[]> {
+  const allContacts: ScrapedContact[] = [];
+  const pageTitle = await page.title();
+  
+  // Función para extraer contactos de la página actual
+  async function extractFromCurrentPage(): Promise<ScrapedContact[]> {
+    const contacts: ScrapedContact[] = [];
+    
+    // Estrategia 1: Buscar cards con selectores conocidos
+    const cardSelectors = [
+      ".autoridad-little", ".card", ".profile", ".concejal", ".diputado",
+      ".legislador", ".persona", ".member", ".item", ".list-item",
+      "[class*='autoridad']", "[class*='diputad']", "[class*='concejal']",
+      "[class*='legislador']", "[class*='card']", "[class*='profile']",
+      "[class*='member']", "[class*='persona']",
+    ];
+    
+    for (const selector of cardSelectors) {
+      try {
+        const elements = await page.$$(selector);
+        if (elements.length >= 2) { // Al menos 2 para ser una lista
+          for (const el of elements) {
+            const data = await el.evaluate(extractCardData);
+            if (data && (data.nombre || data.email)) {
+              data.organizacion = pageTitle || undefined;
+              data.urlFuente = url;
+              contacts.push(data);
+            }
+          }
+          if (contacts.length > 0) {
+            console.log(`Cards con "${selector}": ${contacts.length}`);
+            return contacts;
+          }
+        }
+      } catch {
+        // Continue
+      }
+    }
+    
+    // Estrategia 2: Auto-detectar patrones repetitivos
+    // Buscar elementos que se repiten y contienen emails
+    const autoContacts = await page.evaluate(() => {
+      const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+      const allDivs = document.querySelectorAll("div, li, article, section, tr");
+      const candidates: Map<string, { count: number; elements: Element[] }> = new Map();
+      
+      for (const el of allDivs) {
+        const text = el.textContent || "";
+        const emails = text.match(emailRegex) || [];
+        
+        // Si tiene exactamente 1 email y no es un contenedor gigante
+        if (emails.length === 1 && text.length < 500) {
+          const className = el.className?.toString().substring(0, 50) || el.tagName;
+          if (!candidates.has(className)) {
+            candidates.set(className, { count: 0, elements: [] });
+          }
+          const c = candidates.get(className)!;
+          c.count++;
+          c.elements.push(el);
+        }
+      }
+      
+      // Buscar la clase que más se repite con emails
+      let bestMatch: { count: number; elements: Element[] } | null = null;
+      for (const [, value] of candidates) {
+        if (value.count >= 3 && (!bestMatch || value.count > bestMatch.count)) {
+          bestMatch = value;
+        }
+      }
+      
+      if (bestMatch) {
+        return bestMatch.elements.map(el => {
+          const text = el.textContent || "";
+          const emails = text.match(emailRegex) || [];
+          const nameEl = el.querySelector("h1, h2, h3, h4, strong, b, .name, .title, [class*='nombre'], [class*='name']");
+          const links = Array.from(el.querySelectorAll("a")).map(a => ({
+            href: a.getAttribute("href") || "",
+          }));
+          
+          return {
+            nombre: nameEl?.textContent?.trim() || "",
+            email: emails[0] || "",
+            instagram: links.find(l => l.href.includes("instagram.com"))?.href || "",
+            x: links.find(l => l.href.includes("twitter.com") || l.href.includes("x.com"))?.href || "",
+            linkedin: links.find(l => l.href.includes("linkedin.com"))?.href || "",
+            facebook: links.find(l => l.href.includes("facebook.com"))?.href || "",
+            text: text.substring(0, 150).replace(/\s+/g, " ").trim(),
+          };
+        }).filter(c => c.nombre || c.email);
+      }
+      
+      return [];
+    });
+    
+    if (autoContacts.length > 0) {
+      console.log(`Auto-detectados: ${autoContacts.length} contactos`);
+      for (const c of autoContacts) {
+        contacts.push({
+          nombre: c.nombre || undefined,
+          email: c.email || undefined,
+          instagram: c.instagram || undefined,
+          x: c.x || undefined,
+          linkedin: c.linkedin || undefined,
+          facebook: c.facebook || undefined,
+          organizacion: pageTitle || undefined,
+          urlFuente: url,
+        });
+      }
+      return contacts;
+    }
+    
+    // Estrategia 3: Extraer emails directamente del texto
+    const pageText = await page.evaluate(() => document.body.innerText);
+    const pageEmails = pageText.match(EMAIL_REGEX) || [];
+    
+    if (pageEmails.length > 0) {
+      console.log(`Emails encontrados en texto: ${pageEmails.length}`);
+      for (const email of pageEmails) {
+        contacts.push({
+          nombre: "Contacto sin nombre",
+          email,
+          organizacion: pageTitle || undefined,
+          urlFuente: url,
+        });
+      }
+    }
+    
+    return contacts;
+  }
+  
+  // Extraer de la primera página
+  const firstPageContacts = await extractFromCurrentPage();
+  allContacts.push(...firstPageContacts);
+  
+  // Buscar paginación y navegar
+  const paginationSelectors = [
+    ".pagination a", ".page-numbers a", ".pager a", ".nav-links a",
+    "[class*='pagin'] a", "ul.page-numbers li a", ".next", ".page-next a",
+    "a.next", "a[rel='next']", ".pagination .next a",
+  ];
+  
+  let hasNextPage = true;
+  let pagesScraped = 1;
+  const maxPages = 10; // Límite de páginas
+  
+  while (hasNextPage && pagesScraped < maxPages) {
+    hasNextPage = false;
+    
+    for (const sel of paginationSelectors) {
+      try {
+        // Buscar botón "siguiente" o link de la próxima página
+        const nextLinks = await page.$$(sel);
+        for (const link of nextLinks) {
+          const text = await link.textContent() || "";
+          const href = await link.getAttribute("href") || "";
+          
+          // Detectar si es "siguiente" o un número mayor a la página actual
+          if (text.toLowerCase().includes("next") || text.toLowerCase().includes("siguiente") || 
+              text.includes("»") || text.includes(">") ||
+              (href && !href.includes("#") && parseInt(text) === pagesScraped + 1)) {
+            await link.click();
+            await page.waitForTimeout(2000); // Esperar a que cargue
+            
+            const moreContacts = await extractFromCurrentPage();
+            if (moreContacts.length > 0) {
+              allContacts.push(...moreContacts);
+              pagesScraped++;
+              hasNextPage = true;
+              console.log(`Página ${pagesScraped}: +${moreContacts.length} contactos`);
+            }
+            break;
+          }
+        }
+        if (hasNextPage) break;
+      } catch {
+        // Continue
+      }
+    }
+  }
+  
+  console.log(`Total páginas scrapeadas: ${pagesScraped}`);
+  return allContacts;
+}
+
+// Extraer datos de un perfil individual
+async function scrapeProfile(page: Page, profileUrl: string): Promise<ScrapedContact> {
   console.log(`  Visitando perfil: ${profileUrl}`);
   
   await page.goto(profileUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-  await page.waitForTimeout(2000); // Delay para evitar bloqueos
+  await page.waitForTimeout(1500);
   
-  // Extraer TODOS los links del perfil (incluyendo mailto:)
-  const allLinks = await page.$$eval("a", (elements) =>
-    elements.map((el) => ({
-      text: el.textContent?.trim() || "",
-      href: el.getAttribute("href") || "",
-    }))
-  );
+  const pageText = await page.evaluate(() => document.body.innerText) || "";
+  const allEmails = pageText.match(EMAIL_REGEX) || [];
   
-  // Buscar emails (mailto: y textos que parezcan emails)
-  const emails = allLinks
-    .filter((link) => link.href.startsWith("mailto:"))
-    .map((link) => link.href.replace("mailto:", ""));
+  // Buscar emails en mailto: links
+  const mailtoEmails = await page.$$eval("a[href^='mailto:']", els =>
+    els.map(el => el.getAttribute("href")?.replace("mailto:", "") || "")
+  ).catch(() => [] as string[]);
   
-  // También buscar textos que parezcan emails
-  const pageText = await page.textContent("body") || "";
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-  const textEmails = pageText.match(emailRegex) || [];
-  const allEmails = [...emails, ...textEmails].filter(Boolean);
+  const emails = [...mailtoEmails, ...allEmails].filter((e, i, a) => a.indexOf(e) === i);
   
-  // Extraer redes sociales
-  const instagramLinks = allLinks
-    .filter((link) => link.href.includes("instagram.com"))
-    .map((link) => link.href);
+  // Redes sociales
+  const links = await page.$$eval("a", els =>
+    els.map(el => ({ href: el.getAttribute("href") || "" }))
+  ).catch(() => [] as Array<{ href: string }>);
   
-  const xLinks = allLinks
-    .filter((link) => link.href.includes("twitter.com") || link.href.includes("x.com"))
-    .map((link) => link.href);
+  const instagram = links.find(l => l.href.includes("instagram.com"))?.href || undefined;
+  const x = links.find(l => l.href.includes("twitter.com") || l.href.includes("x.com"))?.href || undefined;
+  const linkedin = links.find(l => l.href.includes("linkedin.com"))?.href || undefined;
+  const facebook = links.find(l => l.href.includes("facebook.com"))?.href || undefined;
   
-  const linkedinLinks = allLinks
-    .filter((link) => link.href.includes("linkedin.com"))
-    .map((link) => link.href);
+  // Teléfono
+  const telLinks = links.find(l => l.href.startsWith("tel:"));
+  const telefono = telLinks?.href.replace("tel:", "") || undefined;
   
-  const facebookLinks = allLinks
-    .filter((link) => link.href.includes("facebook.com"))
-    .map((link) => link.href);
-  
-  // Extraer teléfono (buscar patrones de teléfono)
-  const telefonoMatch = pageText.match(/(?:teléfono|tel|cel|móvil|mobile)?[:\s]?(\+?54?[\s-]?)?(\d{2,4}[\s-]?\d{3,4}[\s-]?\d{3,4})/i);
-  const telefono = telefonoMatch ? telefonoMatch[0] : undefined;
-  
-  // Extraer nombre del perfil (priorizar h1, luego h2, luego otros)
+  // Nombre
   const nameElements = await page.$$eval(
-    "h1, h2, h3, [class*='name'], [class*='titular'], .profile-name",
-    (elements) => elements.map((el) => el.textContent?.trim() || "")
-  );
-  const nombre = nameElements.find((n) => n && n.length > 3 && !isValidName(n) === false) || "Sin nombre";
+    "h1, h2, h3, [class*='name'], [class*='titulo']",
+    els => els.map(el => el.textContent?.trim() || "").filter(n => n.length > 3)
+  ).catch(() => [] as string[]);
+  const nombre = nameElements.find(n => isValidName(n)) || nameElements[0] || undefined;
   
-  // Extraer cargo del perfil (buscar cerca del nombre)
+  // Cargo
   const roleElements = await page.$$eval(
-    "p, span, [class*='cargo'], [class*='role'], [class*='position']",
-    (elements) => elements.map((el) => el.textContent?.trim() || "")
-  );
-  const cargo = roleElements.find((text) => 
-    text.length > 3 && (
-      /concejal/i.test(text) ||
-      /legislador/i.test(text) ||
-      /intendente/i.test(text) ||
-      /senador/i.test(text) ||
-      /diputad/i.test(text) ||
-      /secretario/i.test(text) ||
-      /bloque/i.test(text) ||
-      /partido/i.test(text)
-    )
-  );
+    "p, span, [class*='cargo'], [class*='role'], [class*='bloque']",
+    els => els.map(el => el.textContent?.trim() || "")
+  ).catch(() => [] as string[]);
+  const cargo = roleElements.find(t => 
+    t.length > 3 && /concejal|legislador|intendente|senador|diputad|secretario|bloque|partido/i.test(t)
+  ) || undefined;
   
-  // Extraer organización (título de la página)
   const organization = await page.title();
   
-  console.log(`  -> Nombre: ${nombre}, Email: ${allEmails[0] || "N/A"}, Cargo: ${cargo || "N/A"}`);
+  console.log(`  -> ${nombre || "?"} | ${emails[0] || "N/A"} | ${cargo || "N/A"}`);
   
   return {
-    nombre: nombre !== "Sin nombre" ? nombre : undefined,
+    nombre,
     cargo,
     organizacion: organization || undefined,
-    email: allEmails[0] || undefined,
-    instagram: instagramLinks[0] || undefined,
-    x: xLinks[0] || undefined,
-    linkedin: linkedinLinks[0] || undefined,
-    facebook: facebookLinks[0] || undefined,
+    email: emails[0] || undefined,
+    instagram,
+    x,
+    linkedin,
+    facebook,
     telefono,
     urlFuente: profileUrl,
   };
 }
 
-// Función para filtrar nombres válidos (no títulos de página, no menús, no elementos de UI)
-function isValidName(name: string): boolean {
-  if (!name || name.length < 3) return false;
-  
-  // Excluir títulos de páginas gubernamentales específicos (no TODOS los nombres con estas palabras)
-  const exactForbiddenPatterns = [
-    "Concejo Municipal de",
-    "Municipalidad de",
-    "Legislatura de",
-    "Gobierno de",
-    "Actividad Legislativa",
-    "Concejal en funciones",
-  ];
-  
-  for (const pattern of exactForbiddenPatterns) {
-    if (name.startsWith(pattern)) return false;
-  }
-  
-  // Excluir elementos de UI (palabras completas, no partial matches)
-  const uiPatterns = [
-    "menu",
-    "secondary",
-    "nav",
-    "sidebar",
-    "toggle",
-    "expand",
-    "collapse",
-    "cerrar",
-    "abrir",
-    "buscar",
-    "volver",
-    "atrás",
-  ];
-  
-  for (const pattern of uiPatterns) {
-    // Usar word boundary para evitar falsos positivos
-    const regex = new RegExp(`\\b${pattern}\\b`, "i");
-    if (regex.test(name)) return false;
-  }
-  
-  // Excluir nombres muy cortos (menos de 4 caracteres)
-  if (name.length < 4) return false;
-  
-  // Aceptar cualquier otro nombre como válido
-  return true;
-}
-
+// Función principal
 export async function scrapeContacts(url: string, type: string = "auto"): Promise<ScrapedContact[]> {
   let browser: Browser | null = null;
   const contacts: ScrapedContact[] = [];
@@ -210,196 +360,73 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
     
-    // Paso 1: Raspar la página principal
+    // Configurar user agent realista
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    });
+    
     console.log(`Iniciando scraping (tipo: ${type})...`);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     await page.waitForTimeout(1500);
     
-// Extraer links de la página principal
-    const { links, emails, instagramLinks, xLinks, linkedinLinks, facebookLinks } =
-      await extractLinks(page);
+    // Paso 1: Extraer contactos de todas las páginas (con paginación)
+    const pageContacts = await scrapeWithPagination(page, url);
+    contacts.push(...pageContacts);
     
-    // ---- NUEVO ENFOQUE: Extraer datos de cada card individualmente ----
-    // Buscar cards con más selectores (incluyendo sitios de diputados/legisladores)
-    const cardSelectors = [
-      ".autoridad-little",
-      ".card",
-      ".profile",
-      ".concejal",
-      ".diputado",
-      ".legislador",
-      ".persona",
-      ".member",
-      "article",
-      ".item",
-      "[class*='autoridad']",
-      "[class*='diputad']",
-      "[class*='concejal']",
-      "[class*='legislador']",
-      "[class*='card']",
-      "[class*='profile']",
-      "[class*='member']",
-    ];
+    // Paso 2: Detectar links de perfiles para scraping profundo
+    const links = await page.$$eval("a", els =>
+      els.map(el => ({
+        text: el.textContent?.trim() || "",
+        href: el.getAttribute("href") || "",
+      }))
+    ).catch(() => [] as Array<{ text: string; href: string }>);
     
-    let cardContacts: ScrapedContact[] = [];
-    
-    for (const selector of cardSelectors) {
-      try {
-        const cards = await page.$$eval(selector, (els) =>
-          els.map((el) => {
-            const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-            const text = el.textContent || "";
-            const emails = text.match(emailRegex) || [];
-            
-            // Buscar nombre (h1-h4, strong, .name, .title, etc.)
-            const nameEl = el.querySelector("h1, h2, h3, h4, strong, b, .name, .title, [class*='nombre'], [class*='name'], [class*='titulo']");
-            const nombre = nameEl?.textContent?.trim() || "";
-            
-            // Buscar cargo/bloque
-            const cargoEl = el.querySelector(".cargo, .role, .bloque, [class*='cargo'], [class*='bloque'], [class*='role']");
-            const cargo = cargoEl?.textContent?.trim() || "";
-            
-            // Buscar links de redes sociales dentro del card
-            const links = Array.from(el.querySelectorAll("a")).map(a => ({
-              href: a.getAttribute("href") || "",
-              text: a.textContent?.trim() || ""
-            }));
-            
-            const instagram = links.find(l => l.href.includes("instagram.com"))?.href || "";
-            const x = links.find(l => l.href.includes("twitter.com") || l.href.includes("x.com"))?.href || "";
-            const linkedin = links.find(l => l.href.includes("linkedin.com"))?.href || "";
-            const facebook = links.find(l => l.href.includes("facebook.com"))?.href || "";
-            const telefono = links.find(l => l.href.startsWith("tel:"))?.href.replace("tel:", "") || "";
-            
-            return {
-              nombre,
-              cargo,
-              email: emails[0] || "",
-              instagram,
-              x,
-              linkedin,
-              facebook,
-              telefono,
-              text: text.substring(0, 200).replace(/\s+/g, " ").trim(),
-            };
-          }).filter(c => c.nombre || c.email) // Solo cards con nombre o email
-        );
-        
-        if (cards.length > 0) {
-          console.log(`Cards encontradas con selector "${selector}": ${cards.length}`);
-          const pageTitle = await page.title();
-          cardContacts = cards.map(c => ({
-            nombre: c.nombre || undefined,
-            cargo: c.cargo || undefined,
-            email: c.email || undefined,
-            instagram: c.instagram || undefined,
-            x: c.x || undefined,
-            linkedin: c.linkedin || undefined,
-            facebook: c.facebook || undefined,
-            telefono: c.telefono || undefined,
-            organizacion: pageTitle || undefined,
-            urlFuente: url,
-          }));
-          break; // Si encontramos cards, no seguimos buscando
-        }
-      } catch {
-        // Selector no válido, intentar siguiente
-      }
-    }
-    
-    // Si encontramos cards, usar esos datos
-    if (cardContacts.length > 0) {
-      contacts.push(...cardContacts);
-    } else {
-      // Fallback: buscar nombres y emails por separado
-      const nameElements = await page.$$eval(
-        "h1, h2, h3, h4, strong, .title, .name",
-        (elements) => elements.map((el) => el.textContent?.trim() || "")
-      );
-      const validNames = nameElements.filter(isValidName);
-      
-      // Buscar emails en el texto de la página
-      const pageText = await page.evaluate(() => document.body.innerText);
-      const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-      const pageEmails = pageText.match(emailRegex) || [];
-      
-      // Asociar nombres con emails por índice
-      for (let i = 0; i < validNames.length; i++) {
-        contacts.push({
-          nombre: validNames[i],
-          cargo: undefined,
-          organizacion: await page.title() || undefined,
-          email: pageEmails[i] || emails[i] || undefined,
-          instagram: instagramLinks[i] || undefined,
-          x: xLinks[i] || undefined,
-          linkedin: linkedinLinks[i] || undefined,
-          facebook: facebookLinks[i] || undefined,
-          urlFuente: url,
-        });
-      }
-      
-      // Si no hay nombres pero hay emails, crear contactos con email
-      if (contacts.length === 0 && pageEmails.length > 0) {
-        for (const email of pageEmails) {
-          contacts.push({
-            nombre: "Contacto sin nombre",
-            organizacion: await page.title() || undefined,
-            email,
-            urlFuente: url,
-          });
-        }
-      }
-    }
-// Paso 2: Detectar links de perfiles para scraping profundo
     const siteUrl = new URL(url);
     const profileUrls = links
-      .map((link) => link.href.split("#more-")[0])
-      .filter((href) => {
+      .map(l => l.href.split("#")[0]) // Limpiar anchors
+      .filter(href => {
         if (href.includes("team-showcase")) return true;
-        if (href.includes("/concejal") || href.includes("/legislador") || 
-            href.includes("/perfil") || href.includes("/biografia") ||
-            href.includes("/diputad") || href.includes("/autor") || 
-            href.includes("/integrante")) return true;
+        if (/\/(concejal|legislador|diputad|perfil|biografia|autor|integrante|miembro)/i.test(href)) return true;
         return false;
       })
-      .filter((href, index, self) => self.indexOf(href) === index);
+      .filter((href, i, a) => a.indexOf(href) === i && href.length > 0);
     
-    const profileLinks = profileUrls.map((href) => {
+    const profileLinks = profileUrls.map(href => {
       if (href.startsWith("/")) return `${siteUrl.origin}${href}`;
-      return href;
+      if (href.startsWith("http")) return href;
+      return `${siteUrl.origin}/${href}`;
     });
     
-    // Paso 3: Raspar perfiles individuales (si hay links)
+    // Paso 3: Raspar perfiles individuales
     if (profileLinks.length > 0) {
-      const uniqueProfileUrls = [...new Set(profileLinks)];
-      console.log(`Raspando ${Math.min(uniqueProfileUrls.length, 50)} perfiles individuales...`);
+      const unique = [...new Set(profileLinks)];
+      console.log(`Raspando ${Math.min(unique.length, 50)} perfiles...`);
       
-      for (const profileUrl of uniqueProfileUrls.slice(0, 50)) {
+      for (const profileUrl of unique.slice(0, 50)) {
         try {
           const profileData = await scrapeProfile(page, profileUrl);
           
-          const existingContactIndex = contacts.findIndex(
-            (contact) => {
-              if (!contact.nombre || !profileData.nombre) return false;
-              const contactNameLower = contact.nombre.toLowerCase();
-              const profileNameLower = profileData.nombre.toLowerCase();
-              return contactNameLower.includes(profileNameLower) || 
-                     profileNameLower.includes(contactNameLower);
-            }
-          );
+          // Buscar contacto existente por nombre
+          const idx = contacts.findIndex(c => {
+            if (!c.nombre || !profileData.nombre) return false;
+            const a = c.nombre.toLowerCase();
+            const b = profileData.nombre.toLowerCase();
+            return a.includes(b) || b.includes(a);
+          });
           
-          if (existingContactIndex >= 0) {
-            contacts[existingContactIndex] = {
-              ...contacts[existingContactIndex],
-              nombre: profileData.nombre || contacts[existingContactIndex].nombre,
-              cargo: profileData.cargo || contacts[existingContactIndex].cargo,
-              email: profileData.email || contacts[existingContactIndex].email,
-              instagram: profileData.instagram || contacts[existingContactIndex].instagram,
-              x: profileData.x || contacts[existingContactIndex].x,
-              linkedin: profileData.linkedin || contacts[existingContactIndex].linkedin,
-              facebook: profileData.facebook || contacts[existingContactIndex].facebook,
-              telefono: profileData.telefono || contacts[existingContactIndex].telefono,
-              organizacion: profileData.organizacion || contacts[existingContactIndex].organizacion,
+          if (idx >= 0) {
+            // Sobrescribir con datos del perfil (prioridad total)
+            contacts[idx] = {
+              ...contacts[idx],
+              nombre: profileData.nombre || contacts[idx].nombre,
+              cargo: profileData.cargo || contacts[idx].cargo,
+              email: profileData.email || contacts[idx].email,
+              instagram: profileData.instagram || contacts[idx].instagram,
+              x: profileData.x || contacts[idx].x,
+              linkedin: profileData.linkedin || contacts[idx].linkedin,
+              facebook: profileData.facebook || contacts[idx].facebook,
+              telefono: profileData.telefono || contacts[idx].telefono,
+              organizacion: profileData.organizacion || contacts[idx].organizacion,
               urlFuente: profileUrl,
               _profileScraped: true,
             };
@@ -407,9 +434,9 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
             contacts.push({ ...profileData, urlFuente: profileUrl, _profileScraped: true });
           }
         } catch (error) {
-          console.error(`Error raspando perfil ${profileUrl}:`, error);
+          console.error(`Error perfil ${profileUrl}:`, error);
         }
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(800);
       }
     }
   } catch (error) {
@@ -419,6 +446,6 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
     if (browser) await browser.close();
   }
   
-  console.log("Contactos extraídos:", contacts);
+  console.log(`Total contactos extraídos: ${contacts.length}`);
   return contacts;
 }
