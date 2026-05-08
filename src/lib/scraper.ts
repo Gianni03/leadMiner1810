@@ -215,171 +215,172 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
     await page.waitForTimeout(1500);
     
-    // Extraer links de la página principal
+// Extraer links de la página principal
     const { links, emails, instagramLinks, xLinks, linkedinLinks, facebookLinks } =
       await extractLinks(page);
     
-    // Extraer nombres de contenedores específicos (cards, articles, li)
-    const containerSelectors = [
+    // ---- NUEVO ENFOQUE: Extraer datos de cada card individualmente ----
+    // Buscar cards con más selectores (incluyendo sitios de diputados/legisladores)
+    const cardSelectors = [
+      ".autoridad-little",
       ".card",
       ".profile",
       ".concejal",
-      "article",
-      "li",
-      ".item",
+      ".diputado",
+      ".legislador",
       ".persona",
+      ".member",
+      "article",
+      ".item",
+      "[class*='autoridad']",
+      "[class*='diputad']",
       "[class*='concejal']",
       "[class*='legislador']",
+      "[class*='card']",
+      "[class*='profile']",
+      "[class*='member']",
     ];
     
-    // Intentar extraer nombres de contenedores primero
-    let nameElements: string[] = [];
+    let cardContacts: ScrapedContact[] = [];
     
-    for (const selector of containerSelectors) {
+    for (const selector of cardSelectors) {
       try {
-        const elements = await page.$$eval(selector, (els) =>
+        const cards = await page.$$eval(selector, (els) =>
           els.map((el) => {
-            // Buscar nombre dentro del contenedor (h1-h3, strong, .title)
-            const nameEl = el.querySelector("h1, h2, h3, strong, .title, .name, [class*='name']");
-            return nameEl?.textContent?.trim() || "";
-          }).filter(Boolean)
+            const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+            const text = el.textContent || "";
+            const emails = text.match(emailRegex) || [];
+            
+            // Buscar nombre (h1-h4, strong, .name, .title, etc.)
+            const nameEl = el.querySelector("h1, h2, h3, h4, strong, b, .name, .title, [class*='nombre'], [class*='name'], [class*='titulo']");
+            const nombre = nameEl?.textContent?.trim() || "";
+            
+            // Buscar cargo/bloque
+            const cargoEl = el.querySelector(".cargo, .role, .bloque, [class*='cargo'], [class*='bloque'], [class*='role']");
+            const cargo = cargoEl?.textContent?.trim() || "";
+            
+            // Buscar links de redes sociales dentro del card
+            const links = Array.from(el.querySelectorAll("a")).map(a => ({
+              href: a.getAttribute("href") || "",
+              text: a.textContent?.trim() || ""
+            }));
+            
+            const instagram = links.find(l => l.href.includes("instagram.com"))?.href || "";
+            const x = links.find(l => l.href.includes("twitter.com") || l.href.includes("x.com"))?.href || "";
+            const linkedin = links.find(l => l.href.includes("linkedin.com"))?.href || "";
+            const facebook = links.find(l => l.href.includes("facebook.com"))?.href || "";
+            const telefono = links.find(l => l.href.startsWith("tel:"))?.href.replace("tel:", "") || "";
+            
+            return {
+              nombre,
+              cargo,
+              email: emails[0] || "",
+              instagram,
+              x,
+              linkedin,
+              facebook,
+              telefono,
+              text: text.substring(0, 200).replace(/\s+/g, " ").trim(),
+            };
+          }).filter(c => c.nombre || c.email) // Solo cards con nombre o email
         );
-        if (elements.length > 0) {
-          nameElements = elements;
-          break;
+        
+        if (cards.length > 0) {
+          console.log(`Cards encontradas con selector "${selector}": ${cards.length}`);
+          const pageTitle = await page.title();
+          cardContacts = cards.map(c => ({
+            nombre: c.nombre || undefined,
+            cargo: c.cargo || undefined,
+            email: c.email || undefined,
+            instagram: c.instagram || undefined,
+            x: c.x || undefined,
+            linkedin: c.linkedin || undefined,
+            facebook: c.facebook || undefined,
+            telefono: c.telefono || undefined,
+            organizacion: pageTitle || undefined,
+            urlFuente: url,
+          }));
+          break; // Si encontramos cards, no seguimos buscando
         }
       } catch {
         // Selector no válido, intentar siguiente
       }
     }
     
-    // Si no hay nombres en contenedores, buscar en elementos sueltos
-    if (nameElements.length === 0) {
-      nameElements = await page.$$eval(
-        "h1, h2, h3, .title, .name, strong",
+    // Si encontramos cards, usar esos datos
+    if (cardContacts.length > 0) {
+      contacts.push(...cardContacts);
+    } else {
+      // Fallback: buscar nombres y emails por separado
+      const nameElements = await page.$$eval(
+        "h1, h2, h3, h4, strong, .title, .name",
         (elements) => elements.map((el) => el.textContent?.trim() || "")
       );
-    }
-    
-    // Filtrar nombres válidos
-    const validNames = nameElements.filter(isValidName);
-    
-    // Extraer roles de los contenedores o de párrafos cerca de los nombres
-    const roleElements = await page.$$eval(
-      "p, span, .cargo, .role, .position",
-      (elements) => elements.map((el) => el.textContent?.trim() || "")
-    );
-    const validRoles = roleElements.filter((role) => 
-      role.length > 3 && (
-        /concejal/i.test(role) ||
-        /legislador/i.test(role) ||
-        /intendente/i.test(role) ||
-        /senador/i.test(role) ||
-        /diputad/i.test(role) ||
-        /secretario/i.test(role)
-      )
-    );
-    
-    // Detectar links de perfiles - más flexible
-    // Buscar links que parezcan ser de personas (no del sitio general)
-    const siteUrl = new URL(url);
-    const siteHost = siteUrl.host;
-    
-    // DEBUG: mostrar TODOS los links de la página
-    console.log("=== TODOS LOS LINKS DE LA PÁGINA (primeros 30) ===");
-    links.slice(0, 30).forEach((link, i) => {
-      console.log(`${i}: [${link.text.substring(0, 40)}] -> ${link.href}`);
-    });
-    console.log("=== FIN LINKS ===\n");
-    
-    // Filtrar links de perfiles - PRIORIZAR team-showcase (perfiles de consejales)
-    // Los perfiles de esta web están en /team-showcase/nombre-apellido/
-    // Los URLs pueden tener #more-xxxx al final, hay que quitarlos
-    const profileUrls = links
-      .map((link) => link.href.split("#more-")[0]) // Eliminar #more-xxxx
-      .filter((href) => {
-        // PRIORIDAD 1: team-showcase (perfiles de consejales)
-        if (href.includes("team-showcase")) {
-          return true;
+      const validNames = nameElements.filter(isValidName);
+      
+      // Buscar emails en el texto de la página
+      const pageText = await page.evaluate(() => document.body.innerText);
+      const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+      const pageEmails = pageText.match(emailRegex) || [];
+      
+      // Asociar nombres con emails por índice
+      for (let i = 0; i < validNames.length; i++) {
+        contacts.push({
+          nombre: validNames[i],
+          cargo: undefined,
+          organizacion: await page.title() || undefined,
+          email: pageEmails[i] || emails[i] || undefined,
+          instagram: instagramLinks[i] || undefined,
+          x: xLinks[i] || undefined,
+          linkedin: linkedinLinks[i] || undefined,
+          facebook: facebookLinks[i] || undefined,
+          urlFuente: url,
+        });
+      }
+      
+      // Si no hay nombres pero hay emails, crear contactos con email
+      if (contacts.length === 0 && pageEmails.length > 0) {
+        for (const email of pageEmails) {
+          contacts.push({
+            nombre: "Contacto sin nombre",
+            organizacion: await page.title() || undefined,
+            email,
+            urlFuente: url,
+          });
         }
-        // PRIORIDAD 2: otras URLs de perfiles
+      }
+    }
+// Paso 2: Detectar links de perfiles para scraping profundo
+    const siteUrl = new URL(url);
+    const profileUrls = links
+      .map((link) => link.href.split("#more-")[0])
+      .filter((href) => {
+        if (href.includes("team-showcase")) return true;
         if (href.includes("/concejal") || href.includes("/legislador") || 
             href.includes("/perfil") || href.includes("/biografia") ||
-            href.includes("/autor") || href.includes("/integrante")) {
-          return true;
-        }
+            href.includes("/diputad") || href.includes("/autor") || 
+            href.includes("/integrante")) return true;
         return false;
       })
-      .filter((href, index, self) => self.indexOf(href) === index); // Eliminar duplicados
+      .filter((href, index, self) => self.indexOf(href) === index);
     
-    // Convertir a absolutos
     const profileLinks = profileUrls.map((href) => {
-      if (href.startsWith("/")) {
-        return `${siteUrl.origin}${href}`;
-      }
+      if (href.startsWith("/")) return `${siteUrl.origin}${href}`;
       return href;
     });
     
-    console.log("Perfiles detectados:", profileLinks);
-    
-// Crear contactos iniciales (página principal)
-    // Guardamos las redes de la página principal para usarlas como fallback
-    const pageEmails = emails;
-    const pageInstagrams = instagramLinks;
-    const pageX = xLinks;
-    const pageLinkedin = linkedinLinks;
-    const pageFacebook = facebookLinks;
-    
-    const names = nameElements.filter(Boolean);
-    const roles = roleElements.filter(Boolean).slice(0, names.length);
-    
-    for (let i = 0; i < names.length; i++) {
-      contacts.push({
-        nombre: names[i],
-        cargo: roles[i] || undefined,
-        organizacion: await page.title() || undefined,
-        // Las redes de la página principal son fallback - se sobrescribirán con datos del perfil
-        email: pageEmails[i] || undefined,
-        instagram: pageInstagrams[i] || undefined,
-        x: pageX[i] || undefined,
-        linkedin: pageLinkedin[i] || undefined,
-        facebook: pageFacebook[i] || undefined,
-        urlFuente: url,
-        // Flag para saber si ya scrapeamos el perfil
-        _profileScraped: false,
-      });
-    }
-    
-    // Si no hay nombres, crear un contacto genérico
-    if (contacts.length === 0 && (emails.length > 0 || instagramLinks.length > 0)) {
-      contacts.push({
-        nombre: "Contacto sin nombre",
-        organizacion: await page.title() || undefined,
-        email: emails[0] || undefined,
-        instagram: instagramLinks[0] || undefined,
-        x: xLinks[0] || undefined,
-        linkedin: linkedinLinks[0] || undefined,
-        facebook: facebookLinks[0] || undefined,
-        urlFuente: url,
-      });
-    }
-    
-// Paso 2: Raspar perfiles individuales (si hay links)
+    // Paso 3: Raspar perfiles individuales (si hay links)
     if (profileLinks.length > 0) {
-      // Tomar hasta 50 perfiles únicos (eliminar duplicados por URL base)
       const uniqueProfileUrls = [...new Set(profileLinks)];
       console.log(`Raspando ${Math.min(uniqueProfileUrls.length, 50)} perfiles individuales...`);
       
-      for (const profileUrl of uniqueProfileUrls.slice(0, 50)) { // Limitar a 50 perfiles
+      for (const profileUrl of uniqueProfileUrls.slice(0, 50)) {
         try {
           const profileData = await scrapeProfile(page, profileUrl);
           
-          // PRIORIZAR datos del perfil sobre los de la página principal
-          // Buscar coincidencia por nombre en los contactos existentes
           const existingContactIndex = contacts.findIndex(
             (contact) => {
               if (!contact.nombre || !profileData.nombre) return false;
-              // Coincidencia por nombre parcial o completo
               const contactNameLower = contact.nombre.toLowerCase();
               const profileNameLower = profileData.nombre.toLowerCase();
               return contactNameLower.includes(profileNameLower) || 
@@ -388,8 +389,6 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
           );
           
           if (existingContactIndex >= 0) {
-            // SOBRESCRIBIR todos los datos del perfil (prioridad total)
-            // Esto incluye: email, instagram, x, linkedin, facebook, telefono
             contacts[existingContactIndex] = {
               ...contacts[existingContactIndex],
               nombre: profileData.nombre || contacts[existingContactIndex].nombre,
@@ -401,21 +400,16 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
               facebook: profileData.facebook || contacts[existingContactIndex].facebook,
               telefono: profileData.telefono || contacts[existingContactIndex].telefono,
               organizacion: profileData.organizacion || contacts[existingContactIndex].organizacion,
-              urlFuente: profileUrl, // Actualizar URL fuente al perfil
+              urlFuente: profileUrl,
               _profileScraped: true,
             };
           } else if (profileData.nombre && isValidName(profileData.nombre)) {
-            // Agregar nuevo contacto del perfil
-            contacts.push({
-              ...profileData,
-              urlFuente: profileUrl,
-              _profileScraped: true,
-            });
+            contacts.push({ ...profileData, urlFuente: profileUrl, _profileScraped: true });
           }
         } catch (error) {
           console.error(`Error raspando perfil ${profileUrl}:`, error);
         }
-        await page.waitForTimeout(1000); // Delay entre perfiles
+        await page.waitForTimeout(1000);
       }
     }
   } catch (error) {

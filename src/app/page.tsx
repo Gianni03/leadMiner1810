@@ -2,33 +2,20 @@
 
 import { useState, useMemo } from "react";
 
-type Contact = {
-  nombre?: string;
-  cargo?: string;
-  organizacion?: string;
-  email?: string;
-  instagram?: string;
-  x?: string;
-  linkedin?: string;
-  facebook?: string;
-  telefono?: string;
-  urlFuente?: string;
-};
-
-type Contact = {
-  nombre?: string;
-  cargo?: string;
-  organizacion?: string;
-  email?: string;
-  instagram?: string;
-  x?: string;
-  linkedin?: string;
-  facebook?: string;
-  telefono?: string;
-  urlFuente?: string;
-};
-
 type ScrapingType = "auto" | "cards" | "table" | "links";
+
+type Contact = {
+  nombre?: string;
+  cargo?: string;
+  organizacion?: string;
+  email?: string;
+  instagram?: string;
+  x?: string;
+  linkedin?: string;
+  facebook?: string;
+  telefono?: string;
+  urlFuente?: string;
+};
 
 function LoadingSpinner() {
   return (
