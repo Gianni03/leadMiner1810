@@ -11,6 +11,9 @@ export type ScrapedContact = {
   linkedin?: string;
   facebook?: string;
   telefono?: string;
+  provincia?: string;
+  ciudad?: string;
+  partido?: string;
   urlFuente?: string;
 };
 

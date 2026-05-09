@@ -10,9 +10,9 @@ export type ScrapedContact = {
   linkedin?: string;
   facebook?: string;
   telefono?: string;
-  partido?: string;
-  localidad?: string;
   provincia?: string;
+  ciudad?: string;
+  partido?: string;
   urlFuente?: string;
   _profileScraped?: boolean;
 };
@@ -23,6 +23,97 @@ const INSTAGRAM_REGEX = /instagram\.com\/([^\"/#]+)/i;
 const X_REGEX = /(twitter\.com|x\.com)\/([^\"/#]+)/i;
 const LINKEDIN_REGEX = /linkedin\.com\/([^\"/#]+)/i;
 const FACEBOOK_REGEX = /facebook\.com\/([^\"/#]+)/i;
+
+// Mapeo de dominios y keywords a provincia/ciudad
+const PROVINCIA_MAP: Record<string, string> = {
+  "tucuman": "Tucumán",
+  "catamarca": "Catamarca",
+  "santiago del estero": "Santiago del Estero",
+  "corrientes": "Corrientes",
+  "entre rios": "Entre Ríos",
+  "entrerios": "Entre Ríos",
+  "misiones": "Misiones",
+  "chaco": "Chaco",
+  "formosa": "Formosa",
+  "salta": "Salta",
+  "jujuy": "Jujuy",
+  "la rioja": "La Rioja",
+  "san juan": "San Juan",
+  "sanjuan": "San Juan",
+  "mendoza": "Mendoza",
+  "neuquen": "Neuquén",
+  "rio negro": "Río Negro",
+  "rionegro": "Río Negro",
+  "chubut": "Chubut",
+  "santa cruz": "Santa Cruz",
+  "santacruz": "Santa Cruz",
+  "tierra del fuego": "Tierra del Fuego",
+  "tierradelfuego": "Tierra del Fuego",
+  "cordoba": "Córdoba",
+  "santa fe": "Santa Fe",
+  "santafe": "Santa Fe",
+  "buenos aires": "Buenos Aires",
+  "buenosaires": "Buenos Aires",
+  "caba": "Ciudad Autónoma de Buenos Aires",
+  "capital federal": "Ciudad Autónoma de Buenos Aires",
+  "la pampa": "La Pampa",
+  "lapampa": "La Pampa",
+};
+
+const CIUDAD_MAP: Record<string, string> = {
+  "rosario": "Rosario",
+  "cordoba": "Córdoba",
+  "mendoza": "Mendoza",
+  "tucuman": "San Miguel de Tucumán",
+  "mar del plata": "Mar del Plata",
+  "salta": "Salta",
+  "santa fe": "Santa Fe",
+  "corrientes": "Corrientes",
+  "posadas": "Posadas",
+  "neuquen": "Neuquén",
+  "formosa": "Formosa",
+  "san salvador de jujuy": "San Salvador de Jujuy",
+  "resistencia": "Resistencia",
+  "santiago del estero": "Santiago del Estero",
+  "la plata": "La Plata",
+  "parana": "Paraná",
+  "rawson": "Rawson",
+  "viedma": "Viedma",
+  "rio gallegos": "Río Gallegos",
+  "ushuaia": "Ushuaia",
+  "catamarca": "San Fernando del Valle de Catamarca",
+  "san juan": "San Juan",
+  "san luis": "San Luis",
+  "bariloche": "Bariloche",
+};
+
+// Inferir provincia y ciudad a partir de la URL y el texto del sitio
+function inferLocation(url: string, organization?: string): { provincia?: string; ciudad?: string } {
+  const lowerUrl = url.toLowerCase();
+  const lowerOrg = (organization || "").toLowerCase();
+  const searchIn = `${lowerUrl} ${lowerOrg}`;
+
+  let provincia: string | undefined;
+  let ciudad: string | undefined;
+
+  // Buscar provincia en la URL y organización
+  for (const [key, value] of Object.entries(PROVINCIA_MAP)) {
+    if (searchIn.includes(key)) {
+      provincia = value;
+      break;
+    }
+  }
+
+  // Buscar ciudad en la URL y organización
+  for (const [key, value] of Object.entries(CIUDAD_MAP)) {
+    if (searchIn.includes(key)) {
+      ciudad = value;
+      break;
+    }
+  }
+
+  return { provincia, ciudad };
+}
 
 // Filtrar nombres válidos
 function isValidName(name: string): boolean {
@@ -126,7 +217,10 @@ async function scrapeWithPagination(page: Page, url: string): Promise<ScrapedCon
           for (const el of elements) {
             const data = await el.evaluate(extractCardData);
             if (data && (data.nombre || data.email)) {
+              const loc = inferLocation(url, pageTitle || undefined);
               data.organizacion = pageTitle || undefined;
+              data.provincia = loc.provincia;
+              data.ciudad = loc.ciudad;
               data.urlFuente = url;
               contacts.push(data);
             }
@@ -198,6 +292,7 @@ async function scrapeWithPagination(page: Page, url: string): Promise<ScrapedCon
     
     if (autoContacts.length > 0) {
       console.log(`Auto-detectados: ${autoContacts.length} contactos`);
+      const loc = inferLocation(url, pageTitle || undefined);
       for (const c of autoContacts) {
         contacts.push({
           nombre: c.nombre || undefined,
@@ -207,6 +302,8 @@ async function scrapeWithPagination(page: Page, url: string): Promise<ScrapedCon
           linkedin: c.linkedin || undefined,
           facebook: c.facebook || undefined,
           organizacion: pageTitle || undefined,
+          provincia: loc.provincia,
+          ciudad: loc.ciudad,
           urlFuente: url,
         });
       }
@@ -219,11 +316,14 @@ async function scrapeWithPagination(page: Page, url: string): Promise<ScrapedCon
     
     if (pageEmails.length > 0) {
       console.log(`Emails encontrados en texto: ${pageEmails.length}`);
+      const loc = inferLocation(url, pageTitle || undefined);
       for (const email of pageEmails) {
         contacts.push({
           nombre: "Contacto sin nombre",
           email,
           organizacion: pageTitle || undefined,
+          provincia: loc.provincia,
+          ciudad: loc.ciudad,
           urlFuente: url,
         });
       }
@@ -334,6 +434,7 @@ async function scrapeProfile(page: Page, profileUrl: string): Promise<ScrapedCon
   ) || undefined;
   
   const organization = await page.title();
+  const loc = inferLocation(profileUrl, organization || undefined);
   
   console.log(`  -> ${nombre || "?"} | ${emails[0] || "N/A"} | ${cargo || "N/A"}`);
   
@@ -341,6 +442,8 @@ async function scrapeProfile(page: Page, profileUrl: string): Promise<ScrapedCon
     nombre,
     cargo,
     organizacion: organization || undefined,
+    provincia: loc.provincia,
+    ciudad: loc.ciudad,
     email: emails[0] || undefined,
     instagram,
     x,
@@ -349,6 +452,37 @@ async function scrapeProfile(page: Page, profileUrl: string): Promise<ScrapedCon
     telefono,
     urlFuente: profileUrl,
   };
+}
+
+// Deduplicar contactos por email: quedarse con el que tenga más datos
+function deduplicateByEmails(contacts: ScrapedContact[]): ScrapedContact[] {
+  const byEmail = new Map<string, ScrapedContact>();
+  const noEmail: ScrapedContact[] = [];
+  
+  for (const c of contacts) {
+    if (!c.email) {
+      noEmail.push(c);
+      continue;
+    }
+    const key = c.email.toLowerCase().trim();
+    const existing = byEmail.get(key);
+    if (!existing) {
+      byEmail.set(key, c);
+      continue;
+    }
+    // Quedarse con el que tenga más campos llenos
+    const countFields = (contact: ScrapedContact) => {
+      return [contact.nombre, contact.email, contact.cargo, contact.organizacion,
+              contact.provincia, contact.ciudad, contact.partido,
+              contact.instagram, contact.x, contact.linkedin, contact.facebook,
+              contact.telefono].filter(Boolean).length;
+    };
+    if (countFields(c) > countFields(existing)) {
+      byEmail.set(key, c);
+    }
+  }
+  
+  return [...byEmail.values(), ...noEmail];
 }
 
 // Función principal
@@ -427,6 +561,9 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
               facebook: profileData.facebook || contacts[idx].facebook,
               telefono: profileData.telefono || contacts[idx].telefono,
               organizacion: profileData.organizacion || contacts[idx].organizacion,
+              provincia: profileData.provincia || contacts[idx].provincia,
+              ciudad: profileData.ciudad || contacts[idx].ciudad,
+              partido: profileData.partido || contacts[idx].partido,
               urlFuente: profileUrl,
               _profileScraped: true,
             };
@@ -447,5 +584,10 @@ export async function scrapeContacts(url: string, type: string = "auto"): Promis
   }
   
   console.log(`Total contactos extraídos: ${contacts.length}`);
-  return contacts;
+  
+  // Deduplicación: por email, quedarse con el que tenga más datos
+  const deduplicated = deduplicateByEmails(contacts);
+  console.log(`Después de deduplicación: ${deduplicated.length} contactos`);
+  
+  return deduplicated;
 }
